@@ -26,7 +26,8 @@ const PORT = process.env.PORT || 3001;
 
 app.use(cors({
   origin: [
-    "https://orgchart1.netlify.app/login"
+    "https://balfour-beatty-org.netlify.app",
+    "https://orgchart1.netlify.app",
   ],
   credentials: true
 }));
