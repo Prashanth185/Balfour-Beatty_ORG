@@ -24,7 +24,12 @@ const indexHtml = path.join(clientDist, 'index.html');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+app.use(cors({
+  origin: [
+    "https://your-netlify-site.netlify.app"
+  ],
+  credentials: true
+}));
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
