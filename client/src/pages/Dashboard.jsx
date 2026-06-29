@@ -158,14 +158,12 @@ function DrillDownModal({ title, baseFilter = {}, columns, onClose }) {
 
   useEffect(() => {
     const token = localStorage.getItem('orms_token');
+    console.log("TOKEN =", token);
 
     // ── Fetch ALL trad employees (full columns), then apply all filters client-side.
     // This guarantees drill-down counts match dashboard card counts exactly,
     // because both use the same raw dataset from trad_employees.
-    fetch('/api/trad-org-chart/employees?full=1', {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then(r => r.json())
+    api.tradOrgChart.listEmployees({ full: 1 })
       .then(async (data) => {
         // /api/trad-org-chart/employees returns a plain array
         let rows = Array.isArray(data) ? data : (data.employees || []);

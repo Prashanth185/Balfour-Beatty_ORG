@@ -147,7 +147,11 @@ export const api = {
     export: (type) => request(`/reports/export?type=${type}`),
   },
   tradOrgChart: {
-    listEmployees: () => request('/trad-org-chart/employees'),
+    listEmployees: (params = {}) => {
+      const query = new URLSearchParams(params).toString();
+      return request(`/trad-org-chart/employees${query ? `?${query}` : ''}`);
+    },
+
     createEmployee: (data) => request('/trad-org-chart/employees', {
       method: 'POST',
       body: JSON.stringify(data),
