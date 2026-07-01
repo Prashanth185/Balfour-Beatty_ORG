@@ -71,18 +71,107 @@ function touchProject(pid) {
   `).run(pid);
 }
 
-function requireProject(res, pid) {
-  const proj = db.prepare('SELECT * FROM org_chart_projects WHERE project_id = ?').get(pid);
-  if (!proj) { res.status(404).json({ error: 'Project not found' }); return null; }
-  return proj;
-}
-
 function isActiveEmployeeStatus(status) {
   if (status === undefined || status === null) return true;
   const value = String(status).trim().toLowerCase();
   if (!value) return true;
-  const inactive = ['exited','resigned','retired','terminated','inactive','notice completed','notice-completed','left','leaver','deceased','not active','not-active'];
-  return !inactive.includes(value);
+  return ['live', 'active'].includes(value);
+}
+
+function seedTraditionalProjectFromSingleton(pid) {
+  const hasRows = db.prepare('SELECT COUNT(*) as c FROM proj_trad_employees WHERE project_id = ?').get(pid).c;
+  if (hasRows > 0) return false;
+
+  const sourceEmployees = db.prepare(`
+    SELECT id, employee_id, name, designation, department, photo_url, manager_id, status
+    FROM trad_employees
+    ORDER BY created_at ASC
+  `).all();
+  if (!sourceEmployees.length) return false;
+
+  db.exec('BEGIN');
+  try {
+    const insertStmt = db.prepare(`
+      INSERT INTO proj_trad_employees (project_id, employee_id, name, designation, department, photo_url, manager_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const idMap = {};
+    for (const emp of sourceEmployees) {
+      const result = insertStmt.run(pid, emp.employee_id, emp.name, sqlValue(emp.designation), sqlValue(emp.department), sqlValue(emp.photo_url), null, sqlValue(emp.status) || 'Active');
+      idMap[emp.id] = result.lastInsertRowid;
+    }
+
+    const updateManagerStmt = db.prepare('UPDATE proj_trad_employees SET manager_id = ? WHERE id = ?');
+    for (const emp of sourceEmployees) {
+      if (emp.manager_id && idMap[emp.manager_id] && idMap[emp.id]) {
+        updateManagerStmt.run(idMap[emp.manager_id], idMap[emp.id]);
+      }
+    }
+
+    const titleRow = db.prepare('SELECT title FROM trad_chart_title ORDER BY id DESC LIMIT 1').get();
+    if (titleRow?.title) {
+      db.prepare(`
+        INSERT INTO proj_trad_chart_title (project_id, title, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(project_id) DO UPDATE SET title = excluded.title, updated_at = CURRENT_TIMESTAMP
+      `).run(pid, titleRow.title);
+    }
+
+    const stateRow = db.prepare("SELECT value FROM trad_chart_state WHERE key = 'ui_state' LIMIT 1").get();
+    if (stateRow?.value) {
+      db.prepare(`
+        INSERT INTO proj_trad_chart_state (project_id, key, value, updated_at)
+        VALUES (?, 'ui_state', ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+      `).run(pid, stateRow.value);
+    }
+
+    const styleRow = db.prepare('SELECT color, thickness FROM trad_line_styles ORDER BY id DESC LIMIT 1').get();
+    if (styleRow) {
+      db.prepare(`
+        INSERT INTO proj_trad_line_styles (project_id, color, thickness, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(project_id) DO UPDATE SET color = excluded.color, thickness = excluded.thickness, updated_at = CURRENT_TIMESTAMP
+      `).run(pid, styleRow.color || '#94a3b8', Math.max(1, Math.min(10, Number(styleRow.thickness) || 2)));
+    }
+
+    const nodeColorRows = db.prepare('SELECT employee_id, color FROM trad_node_colors').all();
+    if (nodeColorRows.length) {
+      const colorStmt = db.prepare(`
+        INSERT INTO proj_trad_node_colors (project_id, employee_db_id, color, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(project_id, employee_db_id) DO UPDATE SET color = excluded.color, updated_at = CURRENT_TIMESTAMP
+      `);
+      for (const row of nodeColorRows) {
+        if (idMap[row.employee_id]) {
+          colorStmt.run(pid, idMap[row.employee_id], row.color);
+        }
+      }
+    }
+
+    const sizeRow = db.prepare('SELECT card_w, card_h FROM trad_node_size ORDER BY id DESC LIMIT 1').get();
+    if (sizeRow) {
+      db.prepare(`
+        INSERT INTO proj_trad_node_size (project_id, card_w, card_h, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(project_id) DO UPDATE SET card_w = excluded.card_w, card_h = excluded.card_h, updated_at = CURRENT_TIMESTAMP
+      `).run(pid, Number(sizeRow.card_w) || 180, Number(sizeRow.card_h) || 90);
+    }
+
+    db.exec('COMMIT');
+    touchProject(pid);
+    return true;
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
+
+function requireProject(res, pid) {
+  const proj = db.prepare('SELECT * FROM org_chart_projects WHERE project_id = ?').get(pid);
+  if (!proj) { res.status(404).json({ error: 'Project not found' }); return null; }
+  if (proj.type === 'traditional') seedTraditionalProjectFromSingleton(pid);
+  return proj;
 }
 
 function filterActiveEmployees(rows) {
@@ -129,7 +218,11 @@ router.get('/', authenticateToken, (req, res) => {
   }
   sql += ' ORDER BY p.updated_at DESC';
   const rows = db.prepare(sql).all(...params);
-  res.json(rows);
+  for (const row of rows) {
+    if (row.type === 'traditional') seedTraditionalProjectFromSingleton(row.project_id);
+  }
+  const refreshedRows = db.prepare(sql).all(...params);
+  res.json(refreshedRows);
 });
 
 // POST /api/projects

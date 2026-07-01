@@ -1551,14 +1551,21 @@ export default function TraditionalOrgChart() {
           </div>
         ) : (
           <div className="flex items-center gap-2 group">
-            <h1 className="text-2xl font-bold text-gray-900">{chartTitle}</h1>
             <button
               type="button"
               onClick={() => { setTitleDraft(chartTitle); setEditingTitle(true); }}
-              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 opacity-0 group-hover:opacity-100 transition-opacity"
+              className="text-2xl font-bold text-gray-900 text-left hover:text-blue-700"
               title="Edit chart title"
             >
+              {chartTitle}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setTitleDraft(chartTitle); setEditingTitle(true); }}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-gray-200 bg-white text-sm text-gray-600 hover:bg-blue-50 hover:text-blue-700"
+            >
               <Pencil className="w-4 h-4" />
+              Edit title
             </button>
           </div>
         )}

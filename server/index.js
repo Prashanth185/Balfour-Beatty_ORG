@@ -18,7 +18,7 @@ import projectRoutes from './routes/projects.js';
 import evmsRoutes from './routes/evms.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const clientDist = path.join(__dirname, 'client','dist');
+const clientDist = path.resolve(__dirname, '..', 'client', 'dist');
 const indexHtml = path.join(clientDist, 'index.html');
 
 const app = express();

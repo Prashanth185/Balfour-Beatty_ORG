@@ -21,8 +21,7 @@ function isActiveEmployeeStatus(status) {
   if (status === undefined || status === null) return true;
   const value = String(status).trim().toLowerCase();
   if (!value) return true;
-  const inactive = ['exited','resigned','retired','terminated','inactive','notice completed','notice-completed','left','leaver','deceased','not active','not-active'];
-  return !inactive.includes(value);
+  return ['live', 'active'].includes(value);
 }
 
 function filterActiveEmployees(rows) {
