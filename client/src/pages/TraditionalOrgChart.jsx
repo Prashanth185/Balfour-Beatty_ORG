@@ -1054,6 +1054,8 @@ export default function TraditionalOrgChart() {
   const [chartTitle,     setChartTitle]     = useState('Traditional Org Chart');
   const [editingTitle,   setEditingTitle]   = useState(false);
   const [titleDraft,     setTitleDraft]     = useState('');
+  const [activeEmployeeCount, setActiveEmployeeCount] = useState(0);
+  const [linkedProjectId, setLinkedProjectId] = useState('');
 
   // ── NEW state: F4 export team modal ──
   const [showExportTeam, setShowExportTeam] = useState(false);
@@ -1201,6 +1203,9 @@ export default function TraditionalOrgChart() {
           if (idx >= 0) setNodeSizeIdx(idx);
         }
       })
+      .catch(() => {});
+    api.tradOrgChart.getProjectLink()
+      .then((r) => setLinkedProjectId(r?.projectId || ''))
       .catch(() => {});
   }, []);
 
@@ -1442,8 +1447,41 @@ export default function TraditionalOrgChart() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await api.tradOrgChart.saveState({ expandedIds: Array.from(expandedSet), layoutType, nodeVisibility });
-      flash('Chart saved');
+      const chartState = {
+        expandedIds: Array.from(expandedSet),
+        layoutType,
+        nodeVisibility,
+        sortType,
+        designationOrder,
+        lineColor,
+        lineThickness,
+        nodeColors,
+        nodeSize: {
+          cardW: NODE_SIZE_STEPS[nodeSizeIdx][0],
+          cardH: NODE_SIZE_STEPS[nodeSizeIdx][1],
+        },
+      };
+      await api.tradOrgChart.saveState(chartState);
+      const syncResult = await api.tradOrgChart.syncToProject({
+        projectId: linkedProjectId || undefined,
+        createNew: !linkedProjectId,
+        name: chartTitle,
+        title: chartTitle,
+        description: `${chartTitle} saved from Traditional Org Chart`,
+        state: chartState,
+        lineColor,
+        lineThickness,
+        nodeColors,
+        nodeSize: {
+          cardW: NODE_SIZE_STEPS[nodeSizeIdx][0],
+          cardH: NODE_SIZE_STEPS[nodeSizeIdx][1],
+        },
+      });
+      if (syncResult?.projectId) {
+        setLinkedProjectId(syncResult.projectId);
+        await api.tradOrgChart.saveProjectLink(syncResult.projectId).catch(() => {});
+      }
+      flash('Chart saved to My Projects');
     } catch (err) {
       alert(err.message || 'Failed to save chart');
     } finally {
@@ -1707,7 +1745,7 @@ export default function TraditionalOrgChart() {
             <div className="mb-4 pb-3 border-b border-gray-100">
               <h2 className="text-xl font-bold text-blue-900">{chartTitle}</h2>
               <p className="text-xs text-gray-400 mt-0.5">
-                {employees.length} {employees.length === 1 ? 'employee' : 'employees'} · {new Date().toLocaleDateString()}
+                {activeEmployeeCount} active {activeEmployeeCount === 1 ? 'employee' : 'employees'} · {new Date().toLocaleDateString()}
               </p>
             </div>
           )}

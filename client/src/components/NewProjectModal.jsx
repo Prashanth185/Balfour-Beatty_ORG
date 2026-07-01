@@ -14,7 +14,7 @@ export default function NewProjectModal({ onClose }) {
 
   const handleGoToProjects = () => {
     onClose();
-    navigate('/projects');
+    navigate('/projects?new=1');
   };
 
   const handleManual = () => {

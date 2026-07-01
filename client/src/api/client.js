@@ -200,6 +200,15 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ title }),
     }),
+    getProjectLink: () => request('/trad-org-chart/project-link'),
+    saveProjectLink: (projectId) => request('/trad-org-chart/project-link', {
+      method: 'PUT',
+      body: JSON.stringify({ projectId }),
+    }),
+    syncToProject: (payload) => request('/trad-org-chart/project-sync', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
     // ── Line Style ────────────────────────────────────────────────────────
     getLineStyle: () => request('/trad-org-chart/line-style'),
@@ -297,6 +306,11 @@ export const projects = {
     saveNodeSize: (pid, cardW, cardH) => request(`/projects/${pid}/trad/node-size`, {
       method: 'PUT', body: JSON.stringify({ cardW, cardH }),
     }),
+    validateImport: (pid, file) => {
+      const form = new FormData();
+      form.append('file', file);
+      return request(`/projects/${pid}/trad/import/validate`, { method: 'POST', body: form });
+    },
     shareChart: (pid, chartData) => request(`/projects/${pid}/trad/share`, {
       method: 'POST', body: JSON.stringify({ chartData }),
     }),

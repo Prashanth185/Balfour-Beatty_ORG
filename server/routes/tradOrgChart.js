@@ -17,12 +17,53 @@ function resolveDepartmentId(department) {
   return db.prepare('INSERT INTO departments (name) VALUES (?)').run(name).lastInsertRowid;
 }
 
+function isActiveEmployeeStatus(status) {
+  if (status === undefined || status === null) return true;
+  const value = String(status).trim().toLowerCase();
+  if (!value) return true;
+  const inactive = ['exited','resigned','retired','terminated','inactive','notice completed','notice-completed','left','leaver','deceased','not active','not-active'];
+  return !inactive.includes(value);
+}
+
+function filterActiveEmployees(rows) {
+  return rows.filter((row) => isActiveEmployeeStatus(row.status));
+}
+
+function getStoredProjectLink() {
+  const row = db.prepare("SELECT value FROM trad_chart_state WHERE key = 'project_link'").get();
+  if (!row?.value) return null;
+  try {
+    const parsed = JSON.parse(row.value);
+    return parsed?.projectId || parsed || null;
+  } catch {
+    return row.value;
+  }
+}
+
+function setStoredProjectLink(projectId) {
+  db.prepare(`
+    INSERT INTO trad_chart_state (key, value, updated_at)
+    VALUES ('project_link', ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+  `).run(JSON.stringify(projectId));
+}
+
+function generateProjectId() {
+  const count = db.prepare('SELECT COUNT(*) as c FROM org_chart_projects').get().c;
+  const num = String(count + 1).padStart(3, '0');
+  let candidate = `PRJ${num}`;
+  while (db.prepare('SELECT id FROM org_chart_projects WHERE project_id = ?').get(candidate)) {
+    const n = parseInt(candidate.replace('PRJ', ''), 10) + 1;
+    candidate = `PRJ${String(n).padStart(3, '0')}`;
+  }
+  return candidate;
+}
+
 // ── GET /api/trad-org-chart/employees ──────────────────────────────────────
 // Returns all employees in the traditional org chart (isolated table)
 // Add ?full=1 to get all columns (used by dashboard drill-down modals)
 router.get('/employees', authenticateToken, (req, res) => {
   if (req.query.full === '1') {
-    // Full columns — used by Dashboard DrillDownModal so it can filter client-side
     const rows = db.prepare(`
       SELECT
         te.*,
@@ -32,7 +73,7 @@ router.get('/employees', authenticateToken, (req, res) => {
       LEFT JOIN trad_employees mgr ON mgr.id = te.manager_id
       ORDER BY te.name ASC
     `).all();
-    return res.json(rows);
+    return res.json(filterActiveEmployees(rows));
   }
   const rows = db.prepare(`
     SELECT
@@ -43,19 +84,20 @@ router.get('/employees', authenticateToken, (req, res) => {
       te.department,
       te.photo_url,
       te.manager_id,
+      te.status,
       mgr.name AS manager_name
     FROM trad_employees te
     LEFT JOIN trad_employees mgr ON mgr.id = te.manager_id
     ORDER BY te.created_at ASC
   `).all();
-  res.json(rows);
+  res.json(filterActiveEmployees(rows));
 });
 
 // ── POST /api/trad-org-chart/employees ─────────────────────────────────────
 // Creates a new employee in the traditional org chart
 router.post('/employees', authenticateToken, (req, res) => {
   try {
-    const { employee_id, name, designation, department, manager_id, photo_url } = req.body;
+    const { employee_id, name, designation, department, manager_id, photo_url, status } = req.body;
 
     if (!name?.trim()) {
       return res.status(400).json({ error: 'Name is required' });
@@ -64,8 +106,8 @@ router.post('/employees', authenticateToken, (req, res) => {
     const empId = employee_id?.trim() || `TRAD-${Date.now()}`;
 
     const result = db.prepare(`
-      INSERT INTO trad_employees (employee_id, name, designation, department, photo_url, manager_id)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO trad_employees (employee_id, name, designation, department, photo_url, manager_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(
       empId,
       name.trim(),
@@ -73,6 +115,7 @@ router.post('/employees', authenticateToken, (req, res) => {
       sqlValue(department),
       sqlValue(photo_url),
       manager_id ? Number(manager_id) : null,
+      sqlValue(status) || 'Active',
     );
 
     const newEmp = db.prepare(`
@@ -106,7 +149,12 @@ router.put('/employees/:id', authenticateToken, (req, res) => {
     if (!emp) return res.status(404).json({ error: 'Employee not found' });
 
     const {
-      name, employee_id, designation, department, manager_id,
+      name,
+      employee_id,
+      designation,
+      department,
+      manager_id,
+      status,
     } = req.body;
 
     if (name !== undefined && !String(name).trim()) {
@@ -124,7 +172,8 @@ router.put('/employees/:id', authenticateToken, (req, res) => {
         employee_id = COALESCE(?, employee_id),
         designation = ?,
         department  = ?,
-        manager_id  = ?
+        manager_id  = ?,
+        status      = ?
       WHERE id = ?
     `).run(
       name        !== undefined ? String(name).trim() : null,
@@ -132,6 +181,7 @@ router.put('/employees/:id', authenticateToken, (req, res) => {
       designation !== undefined ? (sqlValue(designation)) : emp.designation,
       department  !== undefined ? (sqlValue(department))  : emp.department,
       manager_id  !== undefined ? (manager_id ? Number(manager_id) : null) : emp.manager_id,
+      status !== undefined ? (sqlValue(status) || 'Active') : emp.status,
       id,
     );
 
@@ -189,7 +239,7 @@ router.delete('/employees/:id', authenticateToken, (req, res) => {
 // ── GET /api/trad-org-chart/hierarchy ──────────────────────────────────────
 // Returns the full tree as a nested structure for rendering (includes node colors)
 router.get('/hierarchy', authenticateToken, (_req, res) => {
-  const all = db.prepare(`
+  const all = filterActiveEmployees(db.prepare(`
     SELECT
       te.id,
       te.employee_id,
@@ -198,13 +248,14 @@ router.get('/hierarchy', authenticateToken, (_req, res) => {
       te.department,
       te.photo_url,
       te.manager_id,
+      te.status,
       mgr.name AS manager_name,
       tnc.color AS node_color
     FROM trad_employees te
     LEFT JOIN trad_employees mgr ON mgr.id = te.manager_id
     LEFT JOIN trad_node_colors tnc ON tnc.employee_id = te.id
     ORDER BY te.created_at ASC
-  `).all();
+  `).all());
 
   // Build a nested tree
   const map = {};
@@ -251,6 +302,147 @@ router.put('/state', authenticateToken, (req, res) => {
   } catch (err) {
     console.error('Save trad state error:', err);
     res.status(500).json({ error: err.message || 'Failed to save state' });
+  }
+});
+
+// ── GET /api/trad-org-chart/project-link ──────────────────────────────────
+router.get('/project-link', authenticateToken, (_req, res) => {
+  res.json({ projectId: getStoredProjectLink() });
+});
+
+// ── PUT /api/trad-org-chart/project-link ──────────────────────────────────
+router.put('/project-link', authenticateToken, (req, res) => {
+  const { projectId } = req.body || {};
+  if (!projectId?.trim()) return res.status(400).json({ error: 'projectId is required' });
+  setStoredProjectLink(projectId.trim());
+  res.json({ ok: true, projectId: projectId.trim() });
+});
+
+// ── POST /api/trad-org-chart/project-sync ─────────────────────────────────
+router.post('/project-sync', authenticateToken, (req, res) => {
+  try {
+    const {
+      createNew = false,
+      projectId: requestedProjectId,
+      name,
+      title,
+      description,
+      state,
+      lineColor,
+      lineThickness,
+      nodeColors,
+      nodeSize,
+    } = req.body || {};
+
+    const linkedProjectId = !createNew ? (requestedProjectId || getStoredProjectLink()) : null;
+    const pid = linkedProjectId || generateProjectId();
+    const projectName = String(name || title || 'Traditional Org Chart').trim() || 'Traditional Org Chart';
+    const chartTitle = String(title || projectName).trim() || 'Traditional Org Chart';
+
+    db.exec('BEGIN');
+    try {
+      const existing = db.prepare('SELECT project_id FROM org_chart_projects WHERE project_id = ?').get(pid);
+      if (existing) {
+        db.prepare(`
+          UPDATE org_chart_projects
+          SET name = ?, type = 'traditional', chart_type = 'traditional', description = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE project_id = ?
+        `).run(projectName, sqlValue(description), pid);
+      } else {
+        db.prepare(`
+          INSERT INTO org_chart_projects (project_id, name, type, chart_type, description, created_by, status)
+          VALUES (?, ?, 'traditional', 'traditional', ?, ?, 'active')
+        `).run(pid, projectName, sqlValue(description), req.user?.username || 'admin');
+      }
+
+      db.prepare('DELETE FROM proj_trad_employees WHERE project_id = ?').run(pid);
+      db.prepare('DELETE FROM proj_trad_chart_state WHERE project_id = ?').run(pid);
+      db.prepare('DELETE FROM proj_trad_node_colors WHERE project_id = ?').run(pid);
+      db.prepare('DELETE FROM proj_trad_line_styles WHERE project_id = ?').run(pid);
+      db.prepare('DELETE FROM proj_trad_chart_title WHERE project_id = ?').run(pid);
+      db.prepare('DELETE FROM proj_trad_node_size WHERE project_id = ?').run(pid);
+
+      const employees = db.prepare(`
+        SELECT id, employee_id, name, designation, department, photo_url, manager_id, status
+        FROM trad_employees
+        ORDER BY created_at ASC
+      `).all();
+
+      const insertStmt = db.prepare(`
+        INSERT INTO proj_trad_employees (project_id, employee_id, name, designation, department, photo_url, manager_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const projectEmployeeIds = {};
+      for (const emp of employees) {
+        const result = insertStmt.run(
+          pid,
+          emp.employee_id,
+          emp.name,
+          sqlValue(emp.designation),
+          sqlValue(emp.department),
+          sqlValue(emp.photo_url),
+          null,
+          sqlValue(emp.status) || 'Active',
+        );
+        projectEmployeeIds[emp.id] = result.lastInsertRowid;
+      }
+
+      const updateManagerStmt = db.prepare('UPDATE proj_trad_employees SET manager_id = ? WHERE id = ?');
+      for (const emp of employees) {
+        if (emp.manager_id && projectEmployeeIds[emp.manager_id] && projectEmployeeIds[emp.id]) {
+          updateManagerStmt.run(projectEmployeeIds[emp.manager_id], projectEmployeeIds[emp.id]);
+        }
+      }
+
+      db.prepare(`
+        INSERT INTO proj_trad_chart_title (project_id, title, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(project_id) DO UPDATE SET title = excluded.title, updated_at = CURRENT_TIMESTAMP
+      `).run(pid, chartTitle);
+
+      db.prepare(`
+        INSERT INTO proj_trad_line_styles (project_id, color, thickness, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(project_id) DO UPDATE SET color = excluded.color, thickness = excluded.thickness, updated_at = CURRENT_TIMESTAMP
+      `).run(pid, (lineColor || '#94a3b8').trim(), Math.max(1, Math.min(10, Number(lineThickness) || 2)));
+
+      const colorEntries = Object.entries(nodeColors || {});
+      const insertColorStmt = db.prepare(`
+        INSERT INTO proj_trad_node_colors (project_id, employee_db_id, color, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(project_id, employee_db_id) DO UPDATE SET color = excluded.color, updated_at = CURRENT_TIMESTAMP
+      `);
+      for (const [sourceEmployeeId, color] of colorEntries) {
+        const projectEmployeeId = projectEmployeeIds[Number(sourceEmployeeId)];
+        if (projectEmployeeId) {
+          insertColorStmt.run(pid, projectEmployeeId, color);
+        }
+      }
+
+      const cardW = Math.max(100, Math.min(500, Number(nodeSize?.cardW) || 180));
+      const cardH = Math.max(60, Math.min(300, Number(nodeSize?.cardH) || 90));
+      db.prepare(`
+        INSERT INTO proj_trad_node_size (project_id, card_w, card_h, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(project_id) DO UPDATE SET card_w = excluded.card_w, card_h = excluded.card_h, updated_at = CURRENT_TIMESTAMP
+      `).run(pid, cardW, cardH);
+
+      db.prepare(`
+        INSERT INTO proj_trad_chart_state (project_id, key, value, updated_at)
+        VALUES (?, 'ui_state', ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+      `).run(pid, JSON.stringify(state || {}));
+
+      setStoredProjectLink(pid);
+      db.exec('COMMIT');
+      res.json({ ok: true, projectId: pid, projectName });
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  } catch (err) {
+    console.error('Project sync error:', err);
+    res.status(500).json({ error: err.message || 'Failed to sync chart to project' });
   }
 });
 
@@ -625,7 +817,7 @@ router.post('/import/execute', authenticateToken, upload.single('file'), (req, r
           currently_working_company, location_of_currently_working_company,
           education, dob, immediate_previous_company
         )
-        VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'Active'), ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(employee_id) DO UPDATE SET
           name = excluded.name,
           designation = COALESCE(excluded.designation, trad_employees.designation),
@@ -653,7 +845,7 @@ router.post('/import/execute', authenticateToken, upload.single('file'), (req, r
           p.empId, p.name, sqlValue(p.desig), sqlValue(p.dept),
           sqlValue(p.gender), sqlValue(p.place), sqlValue(p.dateOfJoinPreviousCompany),
           sqlValue(p.dateOfJoinInBB), sqlValue(p.joinDate), sqlValue(p.dateOfExit),
-          sqlValue(p.serviceDuration), sqlValue(p.remarks), sqlValue(p.status),
+          sqlValue(p.serviceDuration), sqlValue(p.remarks), sqlValue(p.status) || 'Active',
           sqlValue(p.serviceInBB), sqlValue(p.wentToCompany), sqlValue(p.locationOfWentToCompany),
           sqlValue(p.currentlyWorkingCompany), sqlValue(p.locationOfCurrentlyWorkingCompany),
           sqlValue(p.education), sqlValue(p.dob), sqlValue(p.immediatePreviousCompany)

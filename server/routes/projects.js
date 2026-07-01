@@ -77,6 +77,18 @@ function requireProject(res, pid) {
   return proj;
 }
 
+function isActiveEmployeeStatus(status) {
+  if (status === undefined || status === null) return true;
+  const value = String(status).trim().toLowerCase();
+  if (!value) return true;
+  const inactive = ['exited','resigned','retired','terminated','inactive','notice completed','notice-completed','left','leaver','deceased','not active','not-active'];
+  return !inactive.includes(value);
+}
+
+function filterActiveEmployees(rows) {
+  return rows.filter((row) => isActiveEmployeeStatus(row.status));
+}
+
 function sanitizePoint(p) {
   const x = Number(p?.x); const y = Number(p?.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
@@ -96,32 +108,41 @@ function normalizeDirection(d) {
 // GET /api/projects
 router.get('/', authenticateToken, (req, res) => {
   const { q, status } = req.query;
-  let sql = 'SELECT * FROM org_chart_projects WHERE 1=1';
+  let sql = `
+    SELECT
+      p.*,
+      COALESCE((SELECT COUNT(*) FROM proj_trad_employees te WHERE te.project_id = p.project_id), 0) AS employee_count,
+      COALESCE((SELECT COUNT(DISTINCT te.department) FROM proj_trad_employees te WHERE te.project_id = p.project_id AND te.department IS NOT NULL AND te.department != ''), 0) AS department_count,
+      COALESCE((SELECT COUNT(*) FROM proj_trad_employees te WHERE te.project_id = p.project_id AND te.manager_id IS NOT NULL), 0) AS manager_count,
+      COALESCE((SELECT COUNT(*) FROM proj_trad_employees te WHERE te.project_id = p.project_id AND te.manager_id IS NOT NULL), 0) AS relationship_count
+    FROM org_chart_projects p
+    WHERE 1=1`;
   const params = [];
   if (status === 'archived') {
-    sql += ' AND status = ?'; params.push('archived');
+    sql += ' AND p.status = ?'; params.push('archived');
   } else if (!status || status === 'active') {
-    sql += ' AND status = ?'; params.push('active');
+    sql += ' AND p.status = ?'; params.push('active');
   }
   if (q) {
-    sql += ' AND name LIKE ?'; params.push(`%${q}%`);
+    sql += ' AND (p.name LIKE ? OR p.project_id LIKE ? OR p.organization_name LIKE ? OR p.business_unit LIKE ? OR p.location LIKE ?)';
+    params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
   }
-  sql += ' ORDER BY updated_at DESC';
+  sql += ' ORDER BY p.updated_at DESC';
   const rows = db.prepare(sql).all(...params);
   res.json(rows);
 });
 
 // POST /api/projects
 router.post('/', authenticateToken, (req, res) => {
-  const { name, type } = req.body;
+  const { name, type, description, organization_name, business_unit, country, location, chart_type } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: 'Project name is required' });
   if (!['manual', 'traditional'].includes(type)) return res.status(400).json({ error: 'type must be manual or traditional' });
 
   const pid = generateProjectId();
   db.prepare(`
-    INSERT INTO org_chart_projects (project_id, name, type, status)
-    VALUES (?, ?, ?, 'active')
-  `).run(pid, name.trim(), type);
+    INSERT INTO org_chart_projects (project_id, name, type, chart_type, description, organization_name, business_unit, country, location, created_by, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+  `).run(pid, name.trim(), type, chart_type || 'traditional', sqlValue(description), sqlValue(organization_name), sqlValue(business_unit), sqlValue(country), sqlValue(location), req.user?.username || 'admin');
 
   // Initialize default title
   if (type === 'traditional') {
@@ -569,14 +590,14 @@ router.get('/:pid/trad/employees', authenticateToken, (req, res) => {
   const proj = requireProject(res, req.params.pid);
   if (!proj) return;
   const rows = db.prepare(`
-    SELECT te.id, te.employee_id, te.name, te.designation, te.department, te.photo_url, te.manager_id,
+    SELECT te.id, te.employee_id, te.name, te.designation, te.department, te.photo_url, te.manager_id, te.status,
       mgr.name AS manager_name
     FROM proj_trad_employees te
     LEFT JOIN proj_trad_employees mgr ON mgr.id = te.manager_id
     WHERE te.project_id = ?
     ORDER BY te.created_at ASC
   `).all(req.params.pid);
-  res.json(rows);
+  res.json(filterActiveEmployees(rows));
 });
 
 // POST /api/projects/:pid/trad/employees
@@ -584,15 +605,15 @@ router.post('/:pid/trad/employees', authenticateToken, (req, res) => {
   const proj = requireProject(res, req.params.pid);
   if (!proj) return;
   const pid = req.params.pid;
-  const { employee_id, name, designation, department, manager_id, photo_url } = req.body;
+  const { employee_id, name, designation, department, manager_id, photo_url, status } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: 'Name is required' });
 
   const empId = employee_id?.trim() || `TRAD-${Date.now()}`;
   const result = db.prepare(`
-    INSERT INTO proj_trad_employees (project_id, employee_id, name, designation, department, photo_url, manager_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO proj_trad_employees (project_id, employee_id, name, designation, department, photo_url, manager_id, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(pid, empId, name.trim(), sqlValue(designation), sqlValue(department), sqlValue(photo_url),
-    manager_id ? Number(manager_id) : null);
+    manager_id ? Number(manager_id) : null, sqlValue(status) || 'Active');
 
   touchProject(pid);
   const newEmp = db.prepare(`
@@ -646,7 +667,7 @@ router.put('/:pid/trad/employees/:id', authenticateToken, (req, res) => {
   const emp = db.prepare('SELECT * FROM proj_trad_employees WHERE id = ? AND project_id = ?').get(id, pid);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
 
-  const { name, employee_id, designation, department, manager_id } = req.body;
+  const { name, employee_id, designation, department, manager_id, status } = req.body;
 
   if (name !== undefined && !String(name).trim()) {
     return res.status(400).json({ error: 'Name cannot be empty' });
@@ -661,7 +682,8 @@ router.put('/:pid/trad/employees/:id', authenticateToken, (req, res) => {
       employee_id = COALESCE(?, employee_id),
       designation = ?,
       department  = ?,
-      manager_id  = ?
+      manager_id  = ?,
+      status      = ?
     WHERE id = ? AND project_id = ?
   `).run(
     name        !== undefined ? String(name).trim() : null,
@@ -669,6 +691,7 @@ router.put('/:pid/trad/employees/:id', authenticateToken, (req, res) => {
     designation !== undefined ? sqlValue(designation) : emp.designation,
     department  !== undefined ? sqlValue(department)  : emp.department,
     manager_id  !== undefined ? (manager_id ? Number(manager_id) : null) : emp.manager_id,
+    status !== undefined ? (sqlValue(status) || 'Active') : emp.status,
     id, pid,
   );
 
@@ -689,15 +712,15 @@ router.get('/:pid/trad/hierarchy', authenticateToken, (req, res) => {
   if (!proj) return;
   const pid = req.params.pid;
 
-  const all = db.prepare(`
-    SELECT te.id, te.employee_id, te.name, te.designation, te.department, te.photo_url, te.manager_id,
+  const all = filterActiveEmployees(db.prepare(`
+    SELECT te.id, te.employee_id, te.name, te.designation, te.department, te.photo_url, te.manager_id, te.status,
       mgr.name AS manager_name, tnc.color AS node_color
     FROM proj_trad_employees te
     LEFT JOIN proj_trad_employees mgr ON mgr.id = te.manager_id
     LEFT JOIN proj_trad_node_colors tnc ON tnc.employee_db_id = te.id AND tnc.project_id = te.project_id
     WHERE te.project_id = ?
     ORDER BY te.created_at ASC
-  `).all(pid);
+  `).all(pid));
 
   const map = {}; const roots = [];
   for (const e of all) map[e.id] = { ...e, children: [] };
@@ -849,6 +872,48 @@ router.post('/:pid/trad/share', authenticateToken, (req, res) => {
   res.status(201).json({ id, ok: true });
 });
 
+// POST /api/projects/:pid/trad/import/validate
+router.post('/:pid/trad/import/validate', authenticateToken, upload.single('file'), (req, res) => {
+  const proj = requireProject(res, req.params.pid);
+  if (!proj) return;
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+  const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+  const normalise = (items) => items.map((row) => {
+    const r = {};
+    for (const [k, v] of Object.entries(row)) r[k.trim().toLowerCase().replace(/\s+/g, '_')] = String(v ?? '').trim();
+    return r;
+  });
+  const data = normalise(rows);
+  const col = (row, ...aliases) => {
+    for (const a of aliases) if (row[a] !== undefined) return row[a];
+    return '';
+  };
+
+  const parsed = data.map((row) => ({
+    empId: col(row, 'employee_id', 'emp_id', 'id', 'employeeid'),
+    name: col(row, 'employee_name', 'name', 'full_name', 'employeename'),
+    desig: col(row, 'designation', 'title', 'job_title'),
+    dept: col(row, 'department', 'dept'),
+    reportsTo: col(row, 'reports_to_employee_id', 'reports_to', 'manager_id', 'reportsto', 'manager'),
+    status: col(row, 'status', 'employment_status', 'employee_status'),
+  })).filter((p) => p.empId && p.name);
+
+  const rootCount = parsed.filter((p) => !p.reportsTo || p.reportsTo === '').length;
+  const relCount = parsed.filter((p) => p.reportsTo && p.reportsTo !== '').length;
+  return res.json({
+    ok: true,
+    total: parsed.length,
+    rootCount,
+    relationshipCount: relCount,
+    duplicateIds: parsed.filter((p, idx) => parsed.findIndex((item) => item.empId === p.empId) !== idx).map((p) => p.empId),
+    preview: parsed.slice(0, 6).map((p) => ({ empId: p.empId, name: p.name, designation: p.desig, department: p.dept, reportsTo: p.reportsTo, status: p.status })),
+  });
+});
+
 // POST /api/projects/:pid/trad/import
 router.post('/:pid/trad/import', authenticateToken, upload.single('file'), (req, res) => {
   const proj = requireProject(res, req.params.pid);
@@ -877,6 +942,7 @@ router.post('/:pid/trad/import', authenticateToken, upload.single('file'), (req,
     desig:     col(row, 'designation', 'title', 'job_title'),
     dept:      col(row, 'department', 'dept'),
     reportsTo: col(row, 'reports_to_employee_id', 'reports_to', 'manager_id', 'reportsto', 'manager'),
+    status:    col(row, 'status', 'employment_status', 'employee_status'),
   })).filter((p) => p.empId && p.name);
 
   db.exec('BEGIN');
@@ -887,12 +953,12 @@ router.post('/:pid/trad/import', authenticateToken, upload.single('file'), (req,
     }
 
     const insertStmt = db.prepare(`
-      INSERT INTO proj_trad_employees (project_id, employee_id, name, designation, department, manager_id)
-      VALUES (?, ?, ?, ?, ?, NULL)
+      INSERT INTO proj_trad_employees (project_id, employee_id, name, designation, department, manager_id, status)
+      VALUES (?, ?, ?, ?, ?, NULL, ?)
       ON CONFLICT(project_id, employee_id) DO NOTHING
     `);
     for (const p of parsed) {
-      insertStmt.run(pid, p.empId, p.name, sqlValue(p.desig), sqlValue(p.dept));
+      insertStmt.run(pid, p.empId, p.name, sqlValue(p.desig), sqlValue(p.dept), sqlValue(p.status) || 'Active');
     }
 
     const allInserted = db.prepare('SELECT id, employee_id FROM proj_trad_employees WHERE project_id = ?').all(pid);

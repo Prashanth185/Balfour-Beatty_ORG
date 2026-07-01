@@ -7,6 +7,13 @@ const dbPath = path.join(__dirname, 'orms.db');
 
 const db = new DatabaseSync(dbPath);
 
+function ensureColumn(tableName, columnName, columnDefinition) {
+  const existing = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (!existing.some((col) => col.name === columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnDefinition}`);
+  }
+}
+
 db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA foreign_keys = ON');
 
@@ -159,6 +166,7 @@ db.exec(`
     department TEXT,
     photo_url TEXT,
     manager_id INTEGER REFERENCES trad_employees(id) ON DELETE SET NULL,
+    status TEXT DEFAULT 'Active',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -220,6 +228,14 @@ db.exec(`
     project_id TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
     type TEXT NOT NULL CHECK(type IN ('manual', 'traditional')),
+    chart_type TEXT DEFAULT 'traditional',
+    description TEXT,
+    organization_name TEXT,
+    business_unit TEXT,
+    country TEXT,
+    location TEXT,
+    excel_file_name TEXT,
+    created_by TEXT,
     status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'archived')),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -324,6 +340,7 @@ db.exec(`
     department TEXT,
     photo_url TEXT,
     manager_id INTEGER REFERENCES proj_trad_employees(id) ON DELETE SET NULL,
+    status TEXT DEFAULT 'Active',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(project_id, employee_id)
   );
@@ -385,6 +402,35 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
+
+ensureColumn('trad_employees', 'status', "status TEXT DEFAULT 'Active'");
+ensureColumn('trad_employees', 'gender', 'gender TEXT');
+ensureColumn('trad_employees', 'place', 'place TEXT');
+ensureColumn('trad_employees', 'date_of_join_previous_company', 'date_of_join_previous_company TEXT');
+ensureColumn('trad_employees', 'date_of_join_in_bb', 'date_of_join_in_bb TEXT');
+ensureColumn('trad_employees', 'join_date', 'join_date TEXT');
+ensureColumn('trad_employees', 'date_of_exit', 'date_of_exit TEXT');
+ensureColumn('trad_employees', 'service_duration', 'service_duration TEXT');
+ensureColumn('trad_employees', 'remarks', 'remarks TEXT');
+ensureColumn('trad_employees', 'service_in_bb', 'service_in_bb TEXT');
+ensureColumn('trad_employees', 'went_to_company', 'went_to_company TEXT');
+ensureColumn('trad_employees', 'location_of_went_to_company', 'location_of_went_to_company TEXT');
+ensureColumn('trad_employees', 'currently_working_company', 'currently_working_company TEXT');
+ensureColumn('trad_employees', 'location_of_currently_working_company', 'location_of_currently_working_company TEXT');
+ensureColumn('trad_employees', 'education', 'education TEXT');
+ensureColumn('trad_employees', 'dob', 'dob TEXT');
+ensureColumn('trad_employees', 'immediate_previous_company', 'immediate_previous_company TEXT');
+
+ensureColumn('org_chart_projects', 'chart_type', "chart_type TEXT DEFAULT 'traditional'");
+ensureColumn('org_chart_projects', 'description', 'description TEXT');
+ensureColumn('org_chart_projects', 'organization_name', 'organization_name TEXT');
+ensureColumn('org_chart_projects', 'business_unit', 'business_unit TEXT');
+ensureColumn('org_chart_projects', 'country', 'country TEXT');
+ensureColumn('org_chart_projects', 'location', 'location TEXT');
+ensureColumn('org_chart_projects', 'excel_file_name', 'excel_file_name TEXT');
+ensureColumn('org_chart_projects', 'created_by', 'created_by TEXT');
+
+ensureColumn('proj_trad_employees', 'status', "status TEXT DEFAULT 'Active'");
 
 // ── Ensure trad_employees.employee_id has a UNIQUE index ─────────────────────
 // Required for ON CONFLICT(employee_id) upsert logic in import/execute.
